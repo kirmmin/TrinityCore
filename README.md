@@ -38,6 +38,16 @@ Windows, Linux and Mac OSX.
 Detailed installation guides are available in the [wiki](http://www.trinitycore.info/display/tc/Installation+Guide) for
 Windows, Linux and Mac OSX.
 
+Default versions of OPENSSL & Boost in Ubuntu 16.04+ cause errors with trying to compile and run a server for WoD 6.2.4a. Download the following libraries and put them in a custom library location.
+- Boost 1.55 (https://sourceforge.net/projects/boost/files/boost/1.55.0/)
+- OpenSSL 1.0.1g (https://ftp.openssl.org/source/old/1.0.1/)
+
+Then execute CMAKE with the following parameters, updated to the installed locations, to setup using these specific verisons.
+```
+cd build
+cmake ../ -DCMAKE_INSTALL_PREFIX=<server directory> -DBOOST_INCLUDEDIR=<boost 1.55 root folder> -DOPENSSL_INCLUDEDIR=<openssl 1.0.1g root folder>
+```
+
 
 ## Reporting issues
 
