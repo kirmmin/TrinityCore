@@ -269,12 +269,11 @@ void WorldSession::HandleLfgTeleportOpcode(WorldPacket& recvData)
     sLFGMgr->TeleportPlayer(GetPlayer(), out, true);
 }
 
-void WorldSession::HandleDFGetSystemInfo(WorldPacket& recvData)
+void WorldSession::HandleDFGetSystemInfo(WorldPackets::LFG::DFGetSystemInfo& dfGetSystemInfo)
 {
-    bool forPlayer = recvData.ReadBit();
-    TC_LOG_DEBUG("lfg", "CMSG_DF_GET_SYSTEM_INFO %s for %s", GetPlayerInfo().c_str(), (forPlayer ? "player" : "party"));
+    TC_LOG_DEBUG("lfg", "CMSG_DF_GET_SYSTEM_INFO %s for %s", GetPlayerInfo().c_str(), (dfGetSystemInfo.Player ? "player" : "party"));
 
-    if (forPlayer)
+    if (dfGetSystemInfo.Player)
         SendLfgPlayerLockInfo();
     else
         SendLfgPartyLockInfo();
@@ -282,74 +281,118 @@ void WorldSession::HandleDFGetSystemInfo(WorldPacket& recvData)
 
 void WorldSession::SendLfgPlayerLockInfo()
 {
-    ObjectGuid guid = GetPlayer()->GetGUID();
+    TC_LOG_DEBUG("lfg", "SMSG_LFG_PLAYER_INFO %s", GetPlayerInfo().c_str());
 
     // Get Random dungeons that can be done at a certain level and expansion
     uint8 level = GetPlayer()->getLevel();
-    lfg::LfgDungeonSet const& randomDungeons =
-        sLFGMgr->GetRandomAndSeasonalDungeons(level, GetExpansion());
+    lfg::LfgDungeonSet const& randomDungeons = sLFGMgr->GetRandomAndSeasonalDungeons(level, GetExpansion());
+
+    WorldPackets::LFG::LfgPlayerInfo lfgPlayerInfo;
 
     // Get player locked Dungeons
-    lfg::LfgLockMap const& lock = sLFGMgr->GetLockedDungeons(guid);
-    uint32 rsize = uint32(randomDungeons.size());
-    uint32 lsize = uint32(lock.size());
+    for (auto const& lock : sLFGMgr->GetLockedDungeons(_player->GetGUID()))
+        lfgPlayerInfo.BlackList.Slot.emplace_back(lock.first, lock.second.lockStatus, lock.second.requiredItemLevel, lock.second.currentItemLevel);
+    
+    lfgPlayerInfo.BlackList.PlayerGuid = _player->GetGUID();
 
-    TC_LOG_DEBUG("lfg", "SMSG_LFG_PLAYER_INFO %s", GetPlayerInfo().c_str());
-    WorldPacket data(SMSG_LFG_PLAYER_INFO, 1 + rsize * (4 + 1 + 4 + 4 + 4 + 4 + 1 + 4 + 4 + 4) + 4 + lsize * (1 + 4 + 4 + 4 + 4 + 1 + 4 + 4 + 4));
-
-    data << uint8(randomDungeons.size());                  // Random Dungeon count
-    for (lfg::LfgDungeonSet::const_iterator it = randomDungeons.begin(); it != randomDungeons.end(); ++it)
+    for (uint32 slot : randomDungeons)
     {
-        data << uint32(*it);                               // Dungeon Entry (id + type)
-        lfg::LfgReward const* reward = sLFGMgr->GetRandomDungeonReward(*it, level);
-        Quest const* quest = NULL;
-        bool done = false;
-        if (reward)
+        lfgPlayerInfo.Dungeon.emplace_back();
+        WorldPackets::LFG::LfgPlayerDungeonInfo& playerDungeonInfo = lfgPlayerInfo.Dungeon.back();
+        playerDungeonInfo.Slot = slot;
+        playerDungeonInfo.CompletionQuantity = 0;
+        playerDungeonInfo.CompletionLimit = 0;
+        playerDungeonInfo.CompletionCurrencyID = 0;
+        playerDungeonInfo.SpecificQuantity = 0;
+        playerDungeonInfo.SpecificLimit = 0;
+        playerDungeonInfo.OverallQuantity = 0;
+        playerDungeonInfo.OverallLimit = 0;
+        playerDungeonInfo.PurseWeeklyQuantity = 0;
+        playerDungeonInfo.PurseWeeklyLimit = 0;
+        playerDungeonInfo.PurseQuantity = 0;
+        playerDungeonInfo.PurseLimit = 0;
+        playerDungeonInfo.Quantity = 0;
+        playerDungeonInfo.CompletedMask = 0;
+
+        if (lfg::LfgReward const* reward = sLFGMgr->GetRandomDungeonReward(slot, level))
         {
-            quest = sObjectMgr->GetQuestTemplate(reward->firstQuest);
-            if (quest)
+            if (Quest const* quest = sObjectMgr->GetQuestTemplate(reward->firstQuest))
             {
-                done = !GetPlayer()->CanRewardQuest(quest, false);
-                if (done)
+                playerDungeonInfo.FirstReward = !GetPlayer()->CanRewardQuest(quest, false);
+                if (!playerDungeonInfo.FirstReward)
                     quest = sObjectMgr->GetQuestTemplate(reward->otherQuest);
+
+                if (quest)
+                {
+                    playerDungeonInfo.Rewards.RewardMoney = _player->GetQuestMoneyReward(quest);
+                    playerDungeonInfo.Rewards.RewardXP = _player->GetQuestXPReward(quest);
+                    for (uint8 i = 0; i < QUEST_REWARD_ITEM_COUNT; ++i)
+                        if (uint32 itemId = quest->RewardItemId[i])
+                            playerDungeonInfo.Rewards.Item.emplace_back(itemId, quest->RewardItemCount[i]);
+
+                    for (uint32 i = 0; i < QUEST_REWARD_CURRENCY_COUNT; ++i)
+                        if (uint32 currencyId = quest->RewardCurrencyId[i])
+                            playerDungeonInfo.Rewards.Currency.emplace_back(currencyId, quest->RewardCurrencyCount[i]);
+                }
             }
-        }
-
-        data << uint8(done);
-        data << uint32(0);                                              // currencyQuantity
-        data << uint32(0);                                              // some sort of overall cap/weekly cap
-        data << uint32(0);                                              // currencyID
-        data << uint32(0);                                              // tier1Quantity
-        data << uint32(0);                                              // tier1Limit
-        data << uint32(0);                                              // overallQuantity
-        data << uint32(0);                                              // overallLimit
-        data << uint32(0);                                              // periodPurseQuantity
-        data << uint32(0);                                              // periodPurseLimit
-        data << uint32(0);                                              // purseQuantity
-        data << uint32(0);                                              // purseLimit
-        data << uint32(0);                                              // some sort of reward for completion
-        data << uint32(0);                                              // completedEncounters
-        data << uint8(0);                                               // Call to Arms eligible
-
-        for (uint32 i = 0; i < 3; ++i)
-        {
-            data << uint32(0);                                          // Call to Arms Role
-            //if (role)
-            //    BuildQuestReward(data, ctaRoleQuest, GetPlayer());
-        }
-
-        if (quest)
-            BuildQuestReward(data, quest, GetPlayer());
-        else
-        {
-            data << uint32(0);                                          // Money
-            data << uint32(0);                                          // XP
-            data << uint8(0);                                           // Reward count
         }
     }
 
-    BuildPlayerLockDungeonBlock(data, lock);
-    SendPacket(&data);
+    SendPacket(lfgPlayerInfo.Write());
+
+    // data << uint8(randomDungeons.size());                  // Random Dungeon count
+    // for (lfg::LfgDungeonSet::const_iterator it = randomDungeons.begin(); it != randomDungeons.end(); ++it)
+    // {
+    //     data << uint32(*it);                               // Dungeon Entry (id + type)
+    //     lfg::LfgReward const* reward = sLFGMgr->GetRandomDungeonReward(*it, level);
+    //     Quest const* quest = NULL;
+    //     bool done = false;
+    //     if (reward)
+    //     {
+    //         quest = sObjectMgr->GetQuestTemplate(reward->firstQuest);
+    //         if (quest)
+    //         {
+    //             done = !GetPlayer()->CanRewardQuest(quest, false);
+    //             if (done)
+    //                 quest = sObjectMgr->GetQuestTemplate(reward->otherQuest);
+    //         }
+    //     }
+
+    //     data << uint8(done);
+    //     data << uint32(0);                                              // currencyQuantity
+    //     data << uint32(0);                                              // some sort of overall cap/weekly cap
+    //     data << uint32(0);                                              // currencyID
+    //     data << uint32(0);                                              // tier1Quantity
+    //     data << uint32(0);                                              // tier1Limit
+    //     data << uint32(0);                                              // overallQuantity
+    //     data << uint32(0);                                              // overallLimit
+    //     data << uint32(0);                                              // periodPurseQuantity
+    //     data << uint32(0);                                              // periodPurseLimit
+    //     data << uint32(0);                                              // purseQuantity
+    //     data << uint32(0);                                              // purseLimit
+    //     data << uint32(0);                                              // some sort of reward for completion
+    //     data << uint32(0);                                              // completedEncounters
+    //     data << uint8(0);                                               // Call to Arms eligible
+
+    //     for (uint32 i = 0; i < 3; ++i)
+    //     {
+    //         data << uint32(0);                                          // Call to Arms Role
+    //         //if (role)
+    //         //    BuildQuestReward(data, ctaRoleQuest, GetPlayer());
+    //     }
+
+    //     if (quest)
+    //         BuildQuestReward(data, quest, GetPlayer());
+    //     else
+    //     {
+    //         data << uint32(0);                                          // Money
+    //         data << uint32(0);                                          // XP
+    //         data << uint8(0);                                           // Reward count
+    //     }
+    // }
+
+    // BuildPlayerLockDungeonBlock(data, lock);
+    // SendPacket(&data);
 }
 
 void WorldSession::SendLfgPartyLockInfo()
